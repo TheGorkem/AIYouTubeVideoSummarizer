@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  @apply min-h-screen bg-sand bg-hero-grid text-ink antialiased;
+}
+
+::selection {
+  @apply bg-coral/25;
+}
