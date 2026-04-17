@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import base64
-from io import BytesIO
+import shutil
+import subprocess
 from os.path import splitext
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -20,6 +23,7 @@ from youtube_transcript_api import (
 from app.config import Settings
 from app.services.openrouter import create_chat_completion, extract_message_text
 
+SUPPORTED_AUDIO_FORMATS = {"mp3", "wav", "ogg", "flac", "aac", "m4a"}
 
 TRANSCRIPT_RETRY_EXCEPTIONS = (
     RequestBlocked,
@@ -82,8 +86,10 @@ def transcript_from_youtube(url: str) -> dict[str, Any]:
             ),
         ) from exc
 
+    snippets = list(fetched)
+
     transcript = " ".join(
-        snippet.text.replace("\n", " ").strip() for snippet in fetched if snippet.text
+        snippet.text.replace("\n", " ").strip() for snippet in snippets if snippet.text
     )
     transcript = transcript.strip()
     if not transcript:
@@ -95,11 +101,22 @@ def transcript_from_youtube(url: str) -> dict[str, Any]:
             ),
         )
 
+    # Build timestamped transcript [MM:SS] text
+    ts_lines: list[str] = []
+    for snippet in snippets:
+        if not snippet.text:
+            continue
+        total_seconds = int(snippet.start)
+        minutes, seconds = divmod(total_seconds, 60)
+        ts_lines.append(f"[{minutes:02d}:{seconds:02d}] {snippet.text.replace(chr(10), ' ').strip()}")
+    timestamped_transcript = "\n".join(ts_lines) if ts_lines else None
+
     return {
         "source_kind": "youtube",
         "transcript_source": "youtube-transcript-api",
         "language_hint": "tr/en",
         "transcript": transcript,
+        "timestamped_transcript": timestamped_transcript,
     }
 
 
@@ -130,6 +147,97 @@ def _is_video_upload(file: UploadFile) -> bool:
     return extension in {".mp4", ".mpeg", ".mov", ".webm"}
 
 
+def _maybe_prepare_media_for_transcription(
+    *,
+    file: UploadFile,
+    data: bytes,
+    settings: Settings,
+) -> tuple[bytes, str, str]:
+    max_size_bytes = settings.max_upload_size_mb * 1024 * 1024
+    target_size_bytes = settings.compressed_upload_target_mb * 1024 * 1024
+    is_video = _is_video_upload(file)
+    audio_format = _detect_audio_format(file)
+
+    if (
+        not is_video
+        and len(data) <= max_size_bytes
+        and audio_format in SUPPORTED_AUDIO_FORMATS
+    ):
+        return data, audio_format, file.filename or f"upload.{audio_format}"
+
+    if shutil.which("ffmpeg") is None:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=(
+                f"Dosya cok buyuk. En fazla {settings.max_upload_size_mb} MB "
+                "dosya yukleyebilirsiniz. Daha kucuk bir ses dosyasi kullanin."
+            ),
+        )
+
+    compressed = _transcode_media_with_ffmpeg(
+        data=data,
+        source_filename=file.filename or ("recording.mp4" if is_video else "recording.wav"),
+        target_size_bytes=target_size_bytes,
+    )
+
+    if len(compressed) > max_size_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=(
+                f"Dosya islendikten sonra bile cok buyuk kaldi. En fazla "
+                f"{settings.max_upload_size_mb} MB boyutunda, daha kisa veya daha dusuk "
+                "kaliteli bir ses dosyasi yukleyin."
+            ),
+        )
+
+    return compressed, "mp3", "normalized.mp3"
+
+
+def _transcode_media_with_ffmpeg(
+    *,
+    data: bytes,
+    source_filename: str,
+    target_size_bytes: int,
+) -> bytes:
+    suffix = splitext(source_filename)[1] or ".bin"
+    with TemporaryDirectory(prefix="ai-video-summarizer-") as temp_dir:
+        temp_path = Path(temp_dir)
+        input_path = temp_path / f"input{suffix}"
+        output_path = temp_path / "normalized.mp3"
+        input_path.write_bytes(data)
+
+        bitrate_kbps = max(24, min(64, int((target_size_bytes * 8) / 1000 / 60)))
+        command = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(input_path),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-b:a",
+            f"{bitrate_kbps}k",
+            str(output_path),
+        ]
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0 or not output_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "Yuklenen medya dosyasi islenemedi. Desteklenen bir ses/video dosyasi "
+                    "yuklediginden emin olun."
+                ),
+            )
+
+        return output_path.read_bytes()
+
+
 async def transcript_from_upload(
     file: UploadFile, settings: Settings, model: str
 ) -> dict[str, Any]:
@@ -140,23 +248,17 @@ async def transcript_from_upload(
             detail="Yuklenen dosya bos olamaz.",
         )
 
-    max_size_bytes = settings.max_upload_size_mb * 1024 * 1024
-    if len(data) > max_size_bytes:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=(
-                f"Dosya cok buyuk. En fazla {settings.max_upload_size_mb} MB "
-                "dosya yukleyebilirsiniz. Daha kucuk bir ses dosyasi kullanin veya "
-                "videoyu once sikistirin."
-            ),
-        )
-
-    audio_file = BytesIO(data)
-    audio_file.name = file.filename or "recording.mp4"
-    response = (
-        _transcript_from_video_upload(file=file, data=data, settings=settings, model=model)
-        if _is_video_upload(file)
-        else _transcript_from_audio_upload(file=file, data=data, settings=settings, model=model)
+    processed_data, processed_format, processed_filename = _maybe_prepare_media_for_transcription(
+        file=file,
+        data=data,
+        settings=settings,
+    )
+    response = _transcript_from_audio_upload(
+        data=processed_data,
+        audio_format=processed_format,
+        filename=processed_filename,
+        settings=settings,
+        model=model,
     )
     transcript = extract_message_text(response)
     if not transcript:
@@ -170,18 +272,19 @@ async def transcript_from_upload(
         "transcript_source": model,
         "language_hint": None,
         "transcript": transcript,
+        "timestamped_transcript": None,
     }
 
 
 def _transcript_from_audio_upload(
     *,
-    file: UploadFile,
     data: bytes,
+    audio_format: str,
+    filename: str,
     settings: Settings,
     model: str,
 ) -> dict[str, Any]:
     audio_b64 = base64.b64encode(data).decode("utf-8")
-    audio_format = _detect_audio_format(file)
 
     return create_chat_completion(
         settings=settings,
@@ -202,54 +305,13 @@ def _transcript_from_audio_upload(
                         "input_audio": {
                             "data": audio_b64,
                             "format": audio_format,
+                            "filename": filename,
                         },
                         "inputAudio": {
                             "data": audio_b64,
                             "format": audio_format,
+                            "filename": filename,
                         },
-                    },
-                ],
-            }
-        ],
-    )
-
-
-def _transcript_from_video_upload(
-    *,
-    file: UploadFile,
-    data: bytes,
-    settings: Settings,
-    model: str,
-) -> dict[str, Any]:
-    content_type = (file.content_type or "video/mp4").lower()
-    if content_type not in {"video/mp4", "video/mpeg", "video/mov", "video/webm"}:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "Video dosya formati desteklenmiyor. Lutfen mp4, mpeg, mov veya webm yukleyin."
-            ),
-        )
-
-    video_data_url = f"data:{content_type};base64,{base64.b64encode(data).decode('utf-8')}"
-
-    return create_chat_completion(
-        settings=settings,
-        model=model,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            "Bu videodaki konusmalari duz transcript olarak yaz. "
-                            "Konusma yoksa kisaca bunu belirt. Ek aciklama ekleme."
-                        ),
-                    },
-                    {
-                        "type": "video_url",
-                        "video_url": {"url": video_data_url},
-                        "videoUrl": {"url": video_data_url},
                     },
                 ],
             }

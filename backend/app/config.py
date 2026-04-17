@@ -25,7 +25,11 @@ class Settings(BaseSettings):
         "AI Video Summarizer", alias="OPENROUTER_APP_NAME"
     )
     max_upload_size_mb: int = Field(12, alias="MAX_UPLOAD_SIZE_MB")
+    compressed_upload_target_mb: int = Field(8, alias="COMPRESSED_UPLOAD_TARGET_MB")
     allowed_origins: str = Field("http://localhost:3000", alias="ALLOWED_ORIGINS")
+    database_path: str = Field("data/app.db", alias="DATABASE_PATH")
+    jwt_secret: str = Field("change-me-in-production", alias="JWT_SECRET")
+    jwt_expire_minutes: int = Field(1440, alias="JWT_EXPIRE_MINUTES")
 
     @property
     def cors_origins(self) -> list[str]:

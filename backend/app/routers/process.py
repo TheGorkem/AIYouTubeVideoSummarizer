@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from functools import partial
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
 
 from app.config import Settings, get_settings
-from app.schemas import ProcessResponse, SummaryType
+from app.database import db_session
+from app.schemas import ProcessResponse, SummaryLanguage, SummaryType
+from app.services.auth import get_optional_user_id
 from app.services.summarizer import build_summaries
 from app.services.transcript import transcript_from_upload, transcript_from_youtube
 
@@ -22,8 +25,11 @@ def healthcheck() -> dict[str, str]:
 async def process_content(
     youtube_url: str | None = Form(default=None),
     summary_type: SummaryType = Form(default=SummaryType.all),
+    summary_language: SummaryLanguage = Form(default=SummaryLanguage.tr),
     file: UploadFile | None = File(default=None),
+    anonymous_session_id: str | None = Header(default=None, alias="X-Anonymous-Session"),
     settings: Settings = Depends(get_settings),
+    user_id: int | None = Depends(get_optional_user_id),
 ) -> ProcessResponse:
     youtube_url = youtube_url.strip() if youtube_url else None
 
@@ -52,21 +58,45 @@ async def process_content(
             model=settings.openrouter_transcription_model,
         )
 
-    summaries = await loop.run_in_executor(
-        None,
-        partial(
-            build_summaries,
-            settings=settings,
-            model=settings.openrouter_summary_model,
-            transcript=transcript_data["transcript"],
-            summary_type=summary_type,
-        ),
+    summaries = await build_summaries(
+        settings=settings,
+        model=settings.openrouter_summary_model,
+        transcript=transcript_data["transcript"],
+        summary_type=summary_type,
+        language=summary_language.value,
     )
 
+    # Save to history for authenticated or anonymous browser sessions
+    history_id: int | None = None
+    if user_id is not None or anonymous_session_id:
+        async with db_session() as conn:
+            cursor = await conn.execute(
+                """INSERT INTO history
+                   (user_id, anonymous_session_id, source_kind, youtube_url, filename,
+                    transcript, timestamped_transcript, summaries_json, summary_language)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    user_id,
+                    anonymous_session_id if user_id is None else None,
+                    transcript_data["source_kind"],
+                    youtube_url,
+                    file.filename if file else None,
+                    transcript_data["transcript"],
+                    transcript_data.get("timestamped_transcript"),
+                    json.dumps(summaries.model_dump(), ensure_ascii=False),
+                    summary_language.value,
+                ),
+            )
+            await conn.commit()
+            history_id = cursor.lastrowid
+
     return ProcessResponse(
+        id=history_id,
         source_kind=transcript_data["source_kind"],
         transcript_source=transcript_data["transcript_source"],
         language_hint=transcript_data["language_hint"],
         transcript=transcript_data["transcript"],
+        timestamped_transcript=transcript_data.get("timestamped_transcript"),
         summaries=summaries,
+        summary_language=summary_language.value,
     )

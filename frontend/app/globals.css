@@ -2,14 +2,11 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  color-scheme: light;
-}
-
 body {
-  @apply min-h-screen bg-sand bg-hero-grid text-ink antialiased;
+  @apply bg-sand font-sans text-ink antialiased transition-colors duration-200;
 }
 
-::selection {
-  @apply bg-coral/25;
+.dark body,
+:root.dark body {
+  @apply bg-gray-900 text-gray-100;
 }

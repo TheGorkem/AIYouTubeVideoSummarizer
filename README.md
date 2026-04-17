@@ -5,6 +5,7 @@ Bu proje, en mantikli MVP kapsamiyla tasarlandi:
 - YouTube URL verildiginde mevcut transcripti ceker
 - Zoom / Google Meet kayitlari icin dosya yukleme kabul eder
 - Transcript uzerinden AI destekli kisa ozet, uzun ozet, bullet point summary ve ana fikir uretir
+- Kullanicilar icin giris, gecmis ekranı, TXT/PDF export ve kopyalama aksiyonlari sunar
 
 ## Neden bu kapsam secildi?
 
@@ -73,7 +74,11 @@ OPENROUTER_TRANSCRIPTION_MODEL=google/gemini-2.5-flash
 OPENROUTER_SITE_URL=http://localhost:3000
 OPENROUTER_APP_NAME=AI Video Summarizer
 MAX_UPLOAD_SIZE_MB=12
+COMPRESSED_UPLOAD_TARGET_MB=8
 ALLOWED_ORIGINS=http://localhost:3000
+DATABASE_PATH=data/app.db
+JWT_SECRET=change-me-in-production
+JWT_EXPIRE_MINUTES=1440
 ```
 
 Backend varsayilan olarak `http://localhost:8000` uzerinde calisir.
@@ -106,13 +111,47 @@ Notlar:
 - Ayni anda sadece bir kaynak gonderilmelidir.
 - YouTube videosunda transcript yoksa backend kullaniciya dosya yukleme fallback'i onerir.
 
+### `POST /api/v1/auth/register`
+
+Kullanici kaydi olusturur ve token doner.
+
+### `POST /api/v1/auth/login`
+
+Giris yapar ve token doner.
+
+### `GET /api/v1/auth/me`
+
+Authorization header ile aktif kullaniciyi doner.
+
+### `GET /api/v1/history`
+
+Giris yapan kullanicinin gecmis kayitlarini listeler.
+
+### `GET /api/v1/history/{id}`
+
+Tekil gecmis kaydini getirir.
+
+### `DELETE /api/v1/history/{id}`
+
+Gecmis kaydini siler.
+
+## Mevcut Ozellikler
+
+- Transcript sonucu ekranda kopyalanabilir
+- Ozet kartlari tek tek kopyalanabilir
+- Sonuc TXT ve PDF olarak indirilebilir
+- YouTube transcript gelirse zaman damgali transcript gosterilebilir
+- Giris yapan kullanicilarin islem gecmisi SQLite uzerinde saklanir
+- `/history` ekraninda gecmis kayitlari listelenir ve silinebilir
+- Buyuk ses/video dosyalari `ffmpeg` ile otomatik olarak sese donusturulup kucultulmeye calisilir
+
 ## Sonraki mantikli adimlar
 
-- Transcript gecmisi kaydetme
-- Export: TXT / PDF
-- Zaman damgali transcript
-- Ozeti kopyalama butonlari
-- Kullanici girisi ve gecmis ekranlari
+- Anonim gecmisi sonradan hesaba baglama
+- History icinde arama ve filtreleme
+- Transcript parcasi bazli zaman navigasyonu
+- Dosya kucultme / otomatik audio extraction
+- PDF export icin daha iyi tipografi ve Turkce karakter fontu
 
 ## Dokuman notu
 

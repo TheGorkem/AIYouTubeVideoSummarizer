@@ -44,6 +44,7 @@ class ProcessRouteTests(unittest.TestCase):
                 "transcript_source": "youtube-transcript-api",
                 "language_hint": "tr",
                 "transcript": "ornek transcript",
+                "timestamped_transcript": "[00:00] ornek transcript",
             },
         ) as transcript_mock, patch(
             "app.routers.process.build_summaries",
@@ -64,6 +65,11 @@ class ProcessRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         transcript_mock.assert_called_once_with("https://www.youtube.com/watch?v=demo123")
+
+        data = response.json()
+        self.assertIn("timestamped_transcript", data)
+        self.assertIsNone(data["id"])  # anonymous, no history saved
+
 
 if __name__ == "__main__":
     unittest.main()

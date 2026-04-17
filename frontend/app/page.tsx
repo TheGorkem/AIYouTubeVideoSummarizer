@@ -7,7 +7,7 @@ export default function HomePage() {
         <p className="mb-3 text-sm font-medium uppercase tracking-[0.28em] text-ocean">
           AI YouTube Video Summarizer
         </p>
-        <h1 className="text-4xl font-semibold leading-tight sm:text-6xl">
+        <h1 className="text-4xl font-semibold leading-tight dark:text-white sm:text-6xl">
           Link veya kayıt dosyasını ver, transcripti ve özeti dakikalar içinde al.
         </h1>
       </section>
